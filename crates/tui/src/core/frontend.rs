@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::core::engine::EngineHandle;
-use crate::core::events::Event;
+use crate::core::events::{Event, TurnOutcomeStatus};
 use crate::core::ops::Op;
 use crate::sandbox::SandboxPolicy;
 
@@ -279,10 +279,177 @@ impl Frontend for ForwardFrontend {
     }
 }
 
+/// A [`Frontend`] that forwards every event as an **owned** [`Event`] into an
+/// `mpsc` channel.
+///
+/// This is the migration vehicle for the existing TUI event loop, whose giant
+/// `match` consumes events *by value* (e.g. it moves the `String` out of
+/// `MessageDelta { content, .. }`). Subscribing the loop to an [`EventHub`]
+/// through this forwarder lets the loop keep `try_recv`-ing owned events from a
+/// plain `mpsc::UnboundedReceiver<Event>` — byte-for-byte the same match — while
+/// the engine's single-consumer channel is now drained once by the hub and can
+/// be observed by other UIs in parallel.
+///
+/// The clone is cheap relative to a turn's work; `Event` is `Clone` precisely
+/// so multiple frontends can each own a copy.
+pub struct OwnedForwardFrontend {
+    tx: mpsc::UnboundedSender<Event>,
+}
+
+impl OwnedForwardFrontend {
+    /// Create a forwarder plus the receiving half the consumer loop reads.
+    #[must_use]
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Event>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx }, rx)
+    }
+
+    /// Wrap an existing sender.
+    #[must_use]
+    pub fn new(tx: mpsc::UnboundedSender<Event>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait]
+impl Frontend for OwnedForwardFrontend {
+    async fn on_event(&mut self, event: Arc<Event>) {
+        let _ = self.tx.send((*event).clone());
+    }
+}
+
+/// A single Server-Sent Events frame: the SSE `event:` name plus its JSON
+/// `data:` payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SseFrame {
+    /// The SSE event name (e.g. `"message.delta"`).
+    pub event: String,
+    /// The JSON payload serialized into the SSE `data:` line.
+    pub data: serde_json::Value,
+}
+
+/// A [`Frontend`] that serializes engine events into [`SseFrame`]s for a web
+/// client.
+///
+/// This is the web counterpart to [`OwnedForwardFrontend`]: it expresses the
+/// "agent event -> wire frame" translation through the [`Frontend`] trait
+/// instead of inlining it in the HTTP layer. It encodes a curated subset of
+/// events with stable, simple payloads and *skips* the rest (returns `None`
+/// from [`WebFrontend::encode`]), so the wire schema never accidentally leaks an
+/// internal type that is not meant to cross the network boundary.
+pub struct WebFrontend {
+    tx: mpsc::UnboundedSender<SseFrame>,
+}
+
+impl WebFrontend {
+    /// Create a web frontend plus the receiving half the SSE responder drains.
+    #[must_use]
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<SseFrame>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self { tx }, rx)
+    }
+
+    /// Wrap an existing sender.
+    #[must_use]
+    pub fn new(tx: mpsc::UnboundedSender<SseFrame>) -> Self {
+        Self { tx }
+    }
+
+    /// Translate an engine [`Event`] into an [`SseFrame`], or `None` for events
+    /// that are not part of the public web stream.
+    #[must_use]
+    pub fn encode(event: &Event) -> Option<SseFrame> {
+        use serde_json::json;
+        let frame = match event {
+            Event::MessageStarted { index } => SseFrame {
+                event: "message.started".to_string(),
+                data: json!({ "index": index }),
+            },
+            Event::MessageDelta { index, content } => SseFrame {
+                event: "message.delta".to_string(),
+                data: json!({ "index": index, "content": content }),
+            },
+            Event::MessageComplete { index } => SseFrame {
+                event: "message.completed".to_string(),
+                data: json!({ "index": index }),
+            },
+            Event::ThinkingStarted { index } => SseFrame {
+                event: "reasoning.started".to_string(),
+                data: json!({ "index": index }),
+            },
+            Event::ThinkingDelta { index, content } => SseFrame {
+                event: "reasoning.delta".to_string(),
+                data: json!({ "index": index, "content": content }),
+            },
+            Event::ThinkingComplete { index } => SseFrame {
+                event: "reasoning.completed".to_string(),
+                data: json!({ "index": index }),
+            },
+            Event::ToolCallStarted { id, name, input } => SseFrame {
+                event: "tool.started".to_string(),
+                data: json!({ "id": id, "name": name, "input": input }),
+            },
+            Event::ToolCallComplete { id, name, result } => SseFrame {
+                event: "tool.completed".to_string(),
+                data: json!({ "id": id, "name": name, "ok": result.is_ok() }),
+            },
+            Event::TurnStarted { turn_id } => SseFrame {
+                event: "turn.started".to_string(),
+                data: json!({ "turn_id": turn_id }),
+            },
+            Event::TurnComplete { status, error, .. } => SseFrame {
+                event: "turn.completed".to_string(),
+                data: json!({
+                    "status": match status {
+                        TurnOutcomeStatus::Completed => "completed",
+                        TurnOutcomeStatus::Interrupted => "interrupted",
+                        TurnOutcomeStatus::Failed => "failed",
+                    },
+                    "error": error,
+                }),
+            },
+            Event::ApprovalRequired {
+                id,
+                tool_name,
+                description,
+                intent_summary,
+                ..
+            } => SseFrame {
+                event: "approval.required".to_string(),
+                data: json!({
+                    "id": id,
+                    "tool_name": tool_name,
+                    "description": description,
+                    "intent_summary": intent_summary,
+                }),
+            },
+            Event::Status { message } => SseFrame {
+                event: "status".to_string(),
+                data: json!({ "message": message }),
+            },
+            // Everything else (capacity telemetry, prefix-cache heartbeats,
+            // session snapshots, sub-agent internals, terminal pause/resume,
+            // ...) is intentionally not part of the web stream.
+            _ => return None,
+        };
+        Some(frame)
+    }
+}
+
+#[async_trait]
+impl Frontend for WebFrontend {
+    async fn on_event(&mut self, event: Arc<Event>) {
+        if let Some(frame) = Self::encode(event.as_ref()) {
+            let _ = self.tx.send(frame);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::engine::{MockApprovalEvent, mock_engine_handle};
+    use crate::models::Usage;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -440,5 +607,113 @@ mod tests {
             .expect("steer within timeout")
             .expect("steer present");
         assert_eq!(steer, "more context");
+    }
+
+    #[tokio::test]
+    async fn owned_forward_frontend_yields_owned_events() {
+        let mock = mock_engine_handle();
+        let hub = EventHub::new();
+        let sub = hub.subscribe();
+        let _pump = spawn_event_pump(mock.handle.clone(), hub.clone());
+
+        let (forward, mut rx) = OwnedForwardFrontend::channel();
+        tokio::spawn(async move {
+            let mut forward = forward;
+            run_frontend(sub, &mut forward).await;
+        });
+
+        mock.tx_event
+            .send(Event::MessageDelta {
+                index: 0,
+                content: "hi".to_string(),
+            })
+            .await
+            .unwrap();
+
+        // The receiver yields an owned `Event` whose fields can be moved out,
+        // exactly as the TUI loop's by-value match requires.
+        let owned: Event = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event within timeout")
+            .expect("event present");
+        match owned {
+            Event::MessageDelta { index, content } => {
+                assert_eq!(index, 0);
+                assert_eq!(content, "hi");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_frontend_encodes_known_events() {
+        let frame = WebFrontend::encode(&Event::MessageDelta {
+            index: 2,
+            content: "tok".to_string(),
+        })
+        .expect("message delta is part of the web stream");
+        assert_eq!(frame.event, "message.delta");
+        assert_eq!(frame.data["index"], 2);
+        assert_eq!(frame.data["content"], "tok");
+
+        let turn = WebFrontend::encode(&Event::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Interrupted,
+            error: Some("stopped".to_string()),
+            tool_catalog: None,
+            base_url: None,
+        })
+        .expect("turn complete is part of the web stream");
+        assert_eq!(turn.event, "turn.completed");
+        assert_eq!(turn.data["status"], "interrupted");
+        assert_eq!(turn.data["error"], "stopped");
+    }
+
+    #[test]
+    fn web_frontend_skips_events_outside_the_wire_schema() {
+        assert!(
+            WebFrontend::encode(&Event::ResumeEvents).is_none(),
+            "internal terminal events must not cross the web boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_frontend_streams_encoded_frames() {
+        let mock = mock_engine_handle();
+        let hub = EventHub::new();
+        let sub = hub.subscribe();
+        let _pump = spawn_event_pump(mock.handle.clone(), hub.clone());
+
+        let (web, mut rx) = WebFrontend::channel();
+        tokio::spawn(async move {
+            let mut web = web;
+            run_frontend(sub, &mut web).await;
+        });
+
+        // A streamed event is forwarded; an out-of-schema event is dropped.
+        mock.tx_event.send(Event::status("working")).await.unwrap();
+        mock.tx_event.send(Event::ResumeEvents).await.unwrap();
+        mock.tx_event
+            .send(Event::TurnStarted {
+                turn_id: "t1".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let first = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("frame within timeout")
+            .expect("frame present");
+        assert_eq!(first.event, "status");
+        assert_eq!(first.data["message"], "working");
+
+        // The next frame is the turn start: the ResumeEvents in between was
+        // skipped by the encoder, never reaching the wire.
+        let second = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("frame within timeout")
+            .expect("frame present");
+        assert_eq!(second.event, "turn.started");
+        assert_eq!(second.data["turn_id"], "t1");
     }
 }
