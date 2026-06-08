@@ -1,7 +1,8 @@
 /*
- * TUI-flavoured terminal aesthetic. Palette mirrors the runtime's dark theme
- * (crates/tui/src/runtime_mobile.html): cream-on-charcoal, teal accent, gold
- * for tools, jade for success, ember for errors. Monospace throughout.
+ * TUI-flavoured terminal aesthetic, tuned for a clean message-first reading
+ * experience (à la Claude Code / Codex): assistant prose is primary, tool calls
+ * and reasoning collapse into one-liners, low-level status is muted.
+ * Palette mirrors the runtime's dark theme (crates/tui/src/runtime_mobile.html).
  */
 :root {
   color-scheme: dark;
@@ -9,8 +10,10 @@
   --panel: #15181c;
   --panel-2: #1d2127;
   --line: #2c323a;
+  --line-soft: #232830;
   --text: #f4f1e8;
   --muted: #9a968c;
+  --faint: #6f6b62;
   --accent: #48c2a8;
   --accent-dim: #2a8b77;
   --gold: #c89543;
@@ -37,7 +40,7 @@ body {
   color: var(--text);
   font-family: var(--mono);
   font-size: 13.5px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .app {
@@ -120,7 +123,7 @@ body {
 
 .empty {
   color: var(--muted);
-  padding: 16px 10px;
+  padding: 24px 4px;
   font-size: 12.5px;
 }
 
@@ -151,88 +154,186 @@ body {
   background: var(--danger);
 }
 
+/* ---- Transcript ---- */
 .transcript {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 20px 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 16px;
 }
 
-.row {
-  border: 1px solid var(--line);
-  border-left-width: 3px;
-  border-radius: 6px;
-  background: var(--panel);
-  padding: 8px 11px;
+/* Constrain reading width and center, like a chat column. */
+.msg,
+.reasoning,
+.tool,
+.block,
+.note {
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.msg-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.row .label {
-  display: block;
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  margin-bottom: 4px;
-}
-.row.user {
-  border-left-color: var(--user);
-  background: #131a20;
-}
-.row.message {
-  border-left-color: var(--accent);
-}
-.row.reasoning {
-  border-left-color: #7d7468;
-  color: var(--muted);
-  font-style: italic;
-}
-.row.tool {
-  border-left-color: var(--gold);
-}
-.row.compaction,
-.row.status {
-  border-left-color: #4a5260;
-  color: var(--muted);
-}
-.row.error {
-  border-left-color: var(--danger);
-}
-.row.approval {
-  border-left-color: var(--gold);
-  background: #20180c;
+
+.msg.assistant .msg-body {
+  color: var(--text);
 }
 
-.badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 10.5px;
-  border: 1px solid var(--line);
+.msg.user {
+  /* User prompt: a quiet block that stands apart from assistant prose. */
+}
+.msg.user .msg-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #141b22;
+  border-left: 2px solid var(--user);
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  color: #d8e6f2;
+}
+
+/* Code blocks inside messages / tools. */
+.code {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: #0a0c0e;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre;
+  font-size: 12.5px;
+  color: #d7e7df;
+}
+.code.result {
   color: var(--muted);
 }
-.badge.in_progress {
+
+/* Collapsible header shared by reasoning + tools. */
+.collapse-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  min-height: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+.collapse-head:hover:not(:disabled) {
+  color: var(--text);
+}
+.collapse-head:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.chev {
+  color: var(--faint);
+  width: 12px;
+  flex: none;
+}
+
+/* Reasoning: tucked away, muted. */
+.reasoning .reasoning-body {
+  margin: 6px 0 0 20px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Tool call: compact one-liner that expands to args + result. */
+.tool-head {
+  font-size: 12.5px;
+}
+.tool-title {
   color: var(--gold);
-  border-color: var(--gold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
 }
-.badge.completed,
-.badge.decided {
+.tool-status {
+  flex: none;
+  color: var(--faint);
+}
+.tool-status.in_progress {
+  color: var(--gold);
+}
+.tool-status.completed {
   color: var(--ok);
-  border-color: var(--accent-dim);
 }
-.badge.failed {
+.tool-status.failed {
   color: var(--danger);
+}
+.tool-body {
+  margin-left: 20px;
+}
+
+/* Prominent blocks: approvals + errors. */
+.block {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.block.approval {
+  border-color: var(--gold);
+  background: #1c1608;
+}
+.block.error {
   border-color: var(--danger);
+  background: #1f1311;
+}
+.block-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.block.approval .block-title {
+  color: var(--gold);
+}
+.block.error .block-title {
+  color: var(--danger);
+}
+.block-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+/* Status / compaction: a faint inline note, not a card. */
+.note {
+  color: var(--faint);
+  font-size: 11.5px;
+  text-align: center;
 }
 
 .approval-actions {
   display: flex;
   gap: 8px;
-  margin-top: 9px;
+  margin-top: 10px;
+}
+
+.cursor::after {
+  content: "▋";
+  color: var(--accent);
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 /* ---- Composer ---- */
@@ -246,7 +347,7 @@ body {
 }
 .composer textarea {
   width: 100%;
-  min-height: 64px;
+  min-height: 60px;
   max-height: 240px;
   resize: vertical;
   padding: 9px 10px;
@@ -339,15 +440,5 @@ input[type="password"] {
 .notice {
   color: var(--danger);
   font-size: 12px;
-  padding: 6px 16px;
-}
-.cursor::after {
-  content: "▋";
-  color: var(--accent);
-  animation: blink 1s step-end infinite;
-}
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
+  padding: 6px 24px;
 }

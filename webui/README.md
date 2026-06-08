@@ -96,9 +96,22 @@ webui/
 │   ├── styles.css            # dark terminal palette (matches the TUI)
 │   └── components/
 │       ├── Sidebar.tsx       # multi-session list + new/refresh
-│       ├── Transcript.tsx    # turn-grouped transcript, auto-scroll, approvals
+│       ├── Transcript.tsx    # message-first transcript: prose messages, collapsible tools, tucked-away reasoning, muted status
 │       └── Composer.tsx      # prompt input, shell/auto/trust toggles, send/steer/interrupt
 ```
+
+## Presentation
+
+The transcript favours readability over raw event detail, in the spirit of
+Claude Code / Codex:
+
+- **Assistant messages are primary** prose (fenced code blocks rendered as
+  code), with a live cursor while streaming.
+- **Tool calls collapse** to a one-line summary (`tool · <key arg>`) with a
+  status glyph; click to expand the arguments and result.
+- **Reasoning is hidden** behind a "Thought process" toggle.
+- **Status / compaction events are muted** one-line notes; approvals and errors
+  stay prominent.
 
 ## Relationship to the abstract UI layer
 

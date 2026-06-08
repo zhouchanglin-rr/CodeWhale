@@ -38,9 +38,14 @@ export interface Block {
   id: string;
   turnId: string;
   kind: BlockKind;
+  /** Primary body: message/reasoning content, or a tool's result/output. */
   text: string;
   status: BlockStatus;
   toolName?: string;
+  /** Concise one-line summary shown collapsed (tools, approvals). */
+  title?: string;
+  /** Tool call arguments (pretty JSON), kept separate from the result. */
+  toolInput?: string;
   approvalId?: string;
   decision?: string;
 }
@@ -157,6 +162,42 @@ function formatToolInput(input: unknown): string {
   }
 }
 
+function truncate(value: string, max: number): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/**
+ * A concise, human one-liner for a tool call (Claude/Codex style), derived from
+ * the most meaningful argument rather than dumping the whole input object.
+ */
+function summarizeTool(name: string | undefined, input: unknown): string {
+  const base = name ?? "tool";
+  if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
+    const keys = [
+      "command",
+      "cmd",
+      "script",
+      "path",
+      "file_path",
+      "file",
+      "filename",
+      "pattern",
+      "query",
+      "url",
+      "title",
+    ];
+    for (const key of keys) {
+      const value = obj[key];
+      if (typeof value === "string" && value.trim()) {
+        return `${base}  ·  ${truncate(value, 90)}`;
+      }
+    }
+  }
+  return base;
+}
+
 const TURN_DONE = new Set([
   "completed",
   "failed",
@@ -209,8 +250,11 @@ export function reduceEvent(state: SessionState, ev: RuntimeEvent): SessionState
       const kind = item ? kindFromItem(item.kind, !!tool) : tool ? "tool" : "status";
       const toolName = tool?.name ?? (kind === "tool" ? item?.summary : undefined);
       let text = "";
+      let toolInput: string | undefined;
+      let title: string | undefined;
       if (tool) {
-        text = formatToolInput(tool.input);
+        toolInput = formatToolInput(tool.input);
+        title = summarizeTool(toolName, tool.input);
       } else if (item?.detail) {
         text = item.detail;
       }
@@ -221,6 +265,8 @@ export function reduceEvent(state: SessionState, ev: RuntimeEvent): SessionState
         text,
         status: toStatus(item?.status, "in_progress"),
         toolName,
+        toolInput,
+        title,
       });
     }
     case "item.delta": {
@@ -262,17 +308,21 @@ export function reduceEvent(state: SessionState, ev: RuntimeEvent): SessionState
         text,
         status,
         toolName: existing?.toolName ?? (kind === "tool" ? item?.summary : undefined),
+        toolInput: existing?.toolInput,
+        title:
+          existing?.title ??
+          (kind === "tool" ? existing?.toolName ?? item?.summary : undefined),
       });
     }
     case "approval.required": {
       const approvalId = payload.approval_id ?? payload.id;
       if (!approvalId || state.blocks[approvalId]) return state;
-      const text = `${payload.tool_name ?? "tool"}\n${payload.description ?? ""}`.trim();
       return putBlock(state, {
         id: approvalId,
         turnId,
         kind: "approval",
-        text,
+        title: payload.tool_name ?? "approval required",
+        text: payload.description ?? "",
         status: "pending",
         approvalId,
         toolName: payload.tool_name,
@@ -360,6 +410,8 @@ export interface Row {
   text: string;
   status?: BlockStatus;
   toolName?: string;
+  title?: string;
+  toolInput?: string;
   approvalId?: string;
   decision?: string;
 }
@@ -387,6 +439,8 @@ export function toRows(state: SessionState): Row[] {
         text: block.text,
         status: block.status,
         toolName: block.toolName,
+        title: block.title,
+        toolInput: block.toolInput,
         approvalId: block.approvalId,
         decision: block.decision,
       });
