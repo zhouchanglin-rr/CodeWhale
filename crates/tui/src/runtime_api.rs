@@ -574,6 +574,11 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/health", get(health))
         .route("/mobile", get(mobile_page))
         .route("/mobile/", get(mobile_page))
+        // `/app` is a first-class alias for the interactive multi-session web
+        // interface (same handler, gating, and auth as `/mobile`). It gives the
+        // browser UI a name that is not tied to phones.
+        .route("/app", get(mobile_page))
+        .route("/app/", get(mobile_page))
         .route("/v1/runtime/info", get(runtime_info))
         .merge(api_routes)
         .layer(cors_layer(&state.cors_origins))
