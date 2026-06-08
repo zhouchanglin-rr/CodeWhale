@@ -19,6 +19,7 @@ pub mod capacity_memory;
 pub mod coherence;
 pub mod engine;
 pub mod events;
+pub mod frontend;
 pub mod ops;
 pub mod session;
 pub mod tool_parser;
