@@ -193,6 +193,9 @@ working-tree diff. `export` only writes the current diff.
     Features(TuiPassthroughArgs),
     /// Run a local TUI server.
     Serve(TuiPassthroughArgs),
+    /// Expose your session to a phone/tablet over a public HTTPS URL
+    /// (Cloudflare quick tunnel). Sugar for `serve --remote`.
+    Remote(TuiPassthroughArgs),
     /// Generate shell completions for the TUI binary.
     Completions(TuiPassthroughArgs),
     /// Configure provider credentials.
@@ -578,6 +581,13 @@ fn run() -> Result<()> {
         Some(Commands::Serve(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
             delegate_to_tui(&cli, &resolved_runtime, tui_args("serve", args))
+        }
+        Some(Commands::Remote(args)) => {
+            let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
+            // `codewhale remote [opts]` == `codewhale serve --remote [opts]`.
+            let mut passthrough = vec!["serve".to_string(), "--remote".to_string()];
+            passthrough.extend(args.args);
+            delegate_to_tui(&cli, &resolved_runtime, passthrough)
         }
         Some(Commands::Completions(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);

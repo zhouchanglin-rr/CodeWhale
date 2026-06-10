@@ -55,6 +55,7 @@ mod project_doc;
 mod prompt_zones;
 mod prompts;
 mod purge;
+mod remote_tunnel;
 pub mod repl;
 mod retry_status;
 pub mod rlm;
@@ -640,8 +641,18 @@ struct ServeArgs {
     /// Start runtime HTTP/SSE API server with the built-in mobile control page
     #[arg(long)]
     mobile: bool,
-    /// Show a QR code for the mobile URL in the terminal (requires --mobile)
-    #[arg(long, requires = "mobile")]
+    /// Start the mobile control page and expose it over a public HTTPS URL via
+    /// a tunnel (Cloudflare quick tunnel by default), so a phone/tablet can
+    /// reach the session from any network. Binds loopback and keeps auth on.
+    #[arg(long)]
+    remote: bool,
+    /// Override the tunnel command used by --remote (e.g.
+    /// "ngrok http 7878"). Defaults to a Cloudflare quick tunnel. The first
+    /// https:// URL the command prints is used as the public endpoint.
+    #[arg(long = "tunnel-command", value_name = "CMD", requires = "remote")]
+    tunnel_command: Option<String>,
+    /// Show a QR code for the mobile/remote URL in the terminal (requires --mobile or --remote)
+    #[arg(long)]
     qr: bool,
     /// Start ACP server over stdio for editor clients such as Zed
     #[arg(long)]
@@ -676,34 +687,59 @@ struct ServeBindHost {
     mobile_rebound_to_lan: bool,
 }
 
-fn resolve_serve_bind_host(mobile: bool, host: Option<String>) -> ServeBindHost {
-    match (mobile, host) {
-        (true, None) => ServeBindHost {
-            host: "0.0.0.0".to_string(),
-            mobile_rebound_to_lan: true,
-        },
-        (_, Some(host)) => ServeBindHost {
+/// Trim an optional string and discard it if it is blank.
+fn first_nonblank(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_serve_bind_host(mobile: bool, remote: bool, host: Option<String>) -> ServeBindHost {
+    match (mobile, remote, host) {
+        // Explicit --host always wins.
+        (_, _, Some(host)) => ServeBindHost {
             host,
             mobile_rebound_to_lan: false,
         },
-        (false, None) => ServeBindHost {
+        // --remote serves a public tunnel that connects to the server locally,
+        // so the server itself stays on loopback (more secure than --mobile).
+        (_, true, None) => ServeBindHost {
+            host: "127.0.0.1".to_string(),
+            mobile_rebound_to_lan: false,
+        },
+        // --mobile defaults to LAN so phones on the same network can reach it.
+        (true, false, None) => ServeBindHost {
+            host: "0.0.0.0".to_string(),
+            mobile_rebound_to_lan: true,
+        },
+        (false, false, None) => ServeBindHost {
             host: "127.0.0.1".to_string(),
             mobile_rebound_to_lan: false,
         },
     }
 }
 
-fn validate_serve_mode_selection(mcp: bool, http: bool, mobile: bool, acp: bool) -> Result<bool> {
-    if http && mobile {
-        bail!("--http and --mobile are mutually exclusive; choose one");
+fn validate_serve_mode_selection(
+    mcp: bool,
+    http: bool,
+    mobile: bool,
+    remote: bool,
+    acp: bool,
+) -> Result<bool> {
+    let http_like = [http, mobile, remote]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+    if http_like > 1 {
+        bail!("--http, --mobile, and --remote are mutually exclusive; choose one");
     }
-    let http_selected = http || mobile;
+    let http_selected = http_like == 1;
     let selected_modes = [mcp, http_selected, acp]
         .into_iter()
         .filter(|selected| *selected)
         .count();
     if selected_modes != 1 {
-        bail!("Choose exactly one server mode: --mcp, --http/--mobile, or --acp");
+        bail!("Choose exactly one server mode: --mcp, --http/--mobile/--remote, or --acp");
     }
     Ok(http_selected)
 }
@@ -1040,19 +1076,52 @@ async fn main() -> Result<()> {
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
-                let http_selected =
-                    validate_serve_mode_selection(args.mcp, args.http, args.mobile, args.acp)?;
+                let http_selected = validate_serve_mode_selection(
+                    args.mcp, args.http, args.mobile, args.remote, args.acp,
+                )?;
                 if args.mcp {
                     tokio::task::block_in_place(|| mcp_server::run_mcp_server(workspace))
                 } else if http_selected {
                     let config = load_config_from_cli(&cli)?;
                     let cors_origins = resolve_cors_origins(&config, &args.cors_origin);
-                    let bind_host = resolve_serve_bind_host(args.mobile, args.host);
+                    let bind_host =
+                        resolve_serve_bind_host(args.mobile, args.remote, args.host.clone());
                     if bind_host.mobile_rebound_to_lan {
                         println!(
                             "WARNING: --mobile is binding to 0.0.0.0 so LAN devices can reach the mobile control page. Use --host 127.0.0.1 to keep mobile loopback-only."
                         );
                     }
+                    // --remote exposes a public URL, so an unauthenticated
+                    // server would be open to the whole internet. Refuse it.
+                    if args.remote && args.insecure_no_auth {
+                        bail!(
+                            "--remote cannot be combined with --insecure: a public tunnel without auth would expose the runtime API to anyone. Drop --insecure (a token is generated automatically) or pass --auth-token."
+                        );
+                    }
+                    // For --remote, resolve the runtime token up front so the
+                    // server and the tunnel URL share the exact same value.
+                    let (auth_token, tunnel) = if args.remote {
+                        let token = first_nonblank(args.auth_token.clone())
+                            .or_else(|| {
+                                first_nonblank(std::env::var("DEEPSEEK_RUNTIME_TOKEN").ok())
+                            })
+                            .unwrap_or_else(runtime_api::generate_runtime_token);
+                        let command = match args.tunnel_command.as_deref() {
+                            Some(raw) => remote_tunnel::parse_tunnel_command(raw),
+                            None => remote_tunnel::default_cloudflared_command(args.port),
+                        };
+                        let tunnel = remote_tunnel::TunnelConfig {
+                            command,
+                            token: Some(token.clone()),
+                            mobile_path: true,
+                            show_qr: args.qr,
+                        };
+                        (Some(token), Some(tunnel))
+                    } else {
+                        (args.auth_token.clone(), None)
+                    };
+                    // --remote always serves the mobile page (over the tunnel).
+                    let mobile = args.mobile || args.remote;
                     runtime_api::run_http_server(
                         config,
                         workspace,
@@ -1061,10 +1130,11 @@ async fn main() -> Result<()> {
                             port: args.port,
                             workers: args.workers.clamp(1, 8),
                             cors_origins,
-                            auth_token: args.auth_token,
+                            auth_token,
                             insecure_no_auth: args.insecure_no_auth,
-                            mobile: args.mobile,
+                            mobile,
                             show_qr: args.qr,
+                            tunnel,
                         },
                     )
                     .await
@@ -6098,7 +6168,7 @@ mod serve_bind_host_tests {
     #[test]
     fn http_defaults_to_loopback() {
         assert_eq!(
-            resolve_serve_bind_host(false, None),
+            resolve_serve_bind_host(false, false, None),
             ServeBindHost {
                 host: "127.0.0.1".to_string(),
                 mobile_rebound_to_lan: false,
@@ -6109,7 +6179,7 @@ mod serve_bind_host_tests {
     #[test]
     fn mobile_default_rebinds_to_lan_with_warning_flag() {
         assert_eq!(
-            resolve_serve_bind_host(true, None),
+            resolve_serve_bind_host(true, false, None),
             ServeBindHost {
                 host: "0.0.0.0".to_string(),
                 mobile_rebound_to_lan: true,
@@ -6120,7 +6190,7 @@ mod serve_bind_host_tests {
     #[test]
     fn mobile_respects_explicit_loopback_host() {
         assert_eq!(
-            resolve_serve_bind_host(true, Some("127.0.0.1".to_string())),
+            resolve_serve_bind_host(true, false, Some("127.0.0.1".to_string())),
             ServeBindHost {
                 host: "127.0.0.1".to_string(),
                 mobile_rebound_to_lan: false,
@@ -6129,12 +6199,54 @@ mod serve_bind_host_tests {
     }
 
     #[test]
+    fn remote_defaults_to_loopback_so_the_tunnel_fronts_it() {
+        assert_eq!(
+            resolve_serve_bind_host(false, true, None),
+            ServeBindHost {
+                host: "127.0.0.1".to_string(),
+                mobile_rebound_to_lan: false,
+            }
+        );
+    }
+
+    #[test]
+    fn remote_respects_explicit_host_override() {
+        assert_eq!(
+            resolve_serve_bind_host(false, true, Some("0.0.0.0".to_string())),
+            ServeBindHost {
+                host: "0.0.0.0".to_string(),
+                mobile_rebound_to_lan: false,
+            }
+        );
+    }
+
+    #[test]
     fn http_and_mobile_are_mutually_exclusive() {
-        let err = validate_serve_mode_selection(false, true, true, false).unwrap_err();
+        let err = validate_serve_mode_selection(false, true, true, false, false).unwrap_err();
         assert!(
             err.to_string()
-                .contains("--http and --mobile are mutually exclusive")
+                .contains("--http, --mobile, and --remote are mutually exclusive")
         );
+    }
+
+    #[test]
+    fn remote_alone_selects_http_mode() {
+        assert!(validate_serve_mode_selection(false, false, false, true, false).unwrap());
+    }
+
+    #[test]
+    fn remote_conflicts_with_mobile() {
+        let err = validate_serve_mode_selection(false, false, true, true, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--http, --mobile, and --remote are mutually exclusive")
+        );
+    }
+
+    #[test]
+    fn remote_conflicts_with_acp() {
+        let err = validate_serve_mode_selection(false, false, false, true, true).unwrap_err();
+        assert!(err.to_string().contains("exactly one server mode"));
     }
 }
 
