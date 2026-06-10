@@ -85,6 +85,10 @@ pub struct RuntimeApiOptions {
     pub mobile: bool,
     /// Show a QR code for the mobile URL in the terminal.
     pub show_qr: bool,
+    /// When set, start a public tunnel (e.g. a Cloudflare quick tunnel) after
+    /// binding and print the public URL. Powers `codewhale remote` /
+    /// `codewhale serve --remote`.
+    pub tunnel: Option<crate::remote_tunnel::TunnelConfig>,
 }
 
 impl Default for RuntimeApiOptions {
@@ -98,6 +102,7 @@ impl Default for RuntimeApiOptions {
             insecure_no_auth: false,
             mobile: false,
             show_qr: false,
+            tunnel: None,
         }
     }
 }
@@ -138,7 +143,7 @@ fn first_nonblank_token(token: Option<String>) -> Option<String> {
         .filter(|token| !token.is_empty())
 }
 
-fn generate_runtime_token() -> String {
+pub(crate) fn generate_runtime_token() -> String {
     format!(
         "dst_{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -504,6 +509,10 @@ pub async fn run_http_server(
             auth = auth_enabled,
         );
     }
+    let _tunnel_handle = options
+        .tunnel
+        .clone()
+        .map(crate::remote_tunnel::spawn_tunnel);
     let serve_result = axum::serve(listener, app)
         .await
         .map_err(|e| anyhow!("Runtime API server error: {e}"));

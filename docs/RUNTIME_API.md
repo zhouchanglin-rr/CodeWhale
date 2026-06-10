@@ -122,6 +122,8 @@ codewhale doctor --json
 ```bash
 codewhale serve --http [--host 127.0.0.1] [--port 7878] [--workers 2] [--auth-token TOKEN]
 codewhale serve --mobile [--host 0.0.0.0] [--port 7878] [--auth-token TOKEN]
+codewhale serve --remote [--tunnel-command CMD] [--port 7878] [--qr]
+codewhale remote [--tunnel-command CMD] [--qr]   # sugar for `serve --remote`
 ```
 
 Defaults: host `127.0.0.1`, port `7878`, 2 workers (clamped 1–8).
@@ -157,6 +159,47 @@ steer or interrupt an active turn, and resolve normal tool approvals through
 `POST /v1/approvals/{approval_id}`. It is still a local/LAN convenience surface:
 do not expose it directly to the public internet without TLS and a trusted
 fronting layer.
+
+### Remote access from any network: `codewhale remote`
+
+`codewhale remote` (sugar for `codewhale serve --remote`) makes the mobile
+control page reachable from a phone or tablet on **any** network — not just the
+LAN — by starting the runtime server on loopback and fronting it with a public
+tunnel. By default it uses a **Cloudflare quick tunnel** (`cloudflared tunnel
+--url ...`), which needs no Cloudflare account and terminates TLS at the edge,
+so the public URL is HTTPS even though the local server speaks plain HTTP.
+
+```bash
+# Cloudflare quick tunnel (requires the `cloudflared` binary on PATH)
+codewhale remote
+codewhale remote --qr                 # also print a scannable QR code
+codewhale serve --remote              # identical to `codewhale remote`
+
+# Use a different tunnel: the first https:// URL it prints is the endpoint
+codewhale remote --tunnel-command "ngrok http 7878"
+codewhale remote --tunnel-command "tailscale funnel 7878"
+```
+
+Behavior and guarantees:
+
+- **Loopback bind.** The runtime server binds `127.0.0.1` (the tunnel connects
+  to it locally), which is stricter than `--mobile`'s `0.0.0.0`. Pass `--host`
+  to override.
+- **Auth is mandatory.** A runtime token is resolved up front (`--auth-token`,
+  then `DEEPSEEK_RUNTIME_TOKEN`, otherwise auto-generated) and shared by both
+  the server and the printed URL, so the link opens already authenticated.
+  `--remote` **rejects** `--insecure`, since a public, unauthenticated runtime
+  API would be exposed to the whole internet.
+- **Printed URL.** Once the tunnel reports its public hostname, the CLI prints
+  `https://<public-host>/mobile?token=<token>` (plus a QR code with `--qr`). The
+  page stores the token locally and strips it from the address bar.
+- **Tunnel not installed.** If the tunnel binary is missing, the CLI prints an
+  install hint and keeps serving locally; only public access is unavailable.
+
+Security note: the public URL's only guard is the runtime token embedded in it.
+Treat the link like a password, and stop the server to revoke access.
+
+`--remote`, `--http`, and `--mobile` are mutually exclusive — choose one.
 
 ### Endpoints
 

@@ -205,6 +205,41 @@ keys take precedence over the keyring and environment and are easier to rotate.
 
 > To rotate or remove a saved key: `codewhale auth clear --provider deepseek`.
 
+### Remote access from your phone or tablet
+
+`codewhale remote` exposes your live session to a phone or tablet over a public
+HTTPS URL, from any network. It runs the built-in mobile control page on
+loopback and fronts it with a tunnel — by default a **Cloudflare quick tunnel**
+(`cloudflared tunnel --url ...`), which needs no Cloudflare account and provides
+HTTPS automatically.
+
+```bash
+codewhale remote            # start a Cloudflare quick tunnel
+codewhale remote --qr       # also print a QR code to scan from your phone
+codewhale serve --remote    # identical to `codewhale remote`
+
+# Bring your own tunnel: the first https:// URL it prints is used as the endpoint
+codewhale remote --tunnel-command "ngrok http 7878"
+codewhale remote --tunnel-command "tailscale funnel 7878"
+```
+
+Once the tunnel is live, the CLI prints a ready-to-open
+`https://<public-host>/mobile?token=<token>` URL (and a QR code with `--qr`).
+Open it on your phone to list threads, send prompts, watch live output, steer or
+interrupt a turn, and approve tools.
+
+Requirements and safety:
+
+- Needs the `cloudflared` binary on `PATH` for the default tunnel (a missing
+  binary just prints an install hint and keeps serving locally). Any other
+  tunnel works via `--tunnel-command`.
+- The server binds `127.0.0.1`; auth is always on (a runtime token is generated
+  and embedded in the printed URL), and `--remote` refuses `--insecure`.
+- The public URL's only guard is the embedded token — treat the link like a
+  password, and stop the server to revoke access.
+
+See [docs/RUNTIME_API.md](docs/RUNTIME_API.md) for the full runtime API contract.
+
 ### Tencent Cloud / CNB Remote-First Path
 
 For an always-on workspace you can control from a phone, use the Tencent-native
